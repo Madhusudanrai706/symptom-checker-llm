@@ -6,6 +6,22 @@ A Node/Express backend forwards the request to a Hugging Face LLM model, which r
 ⚠️ **Disclaimer**: This project is for **educational/demo purposes only**.  
 It is **not medical advice** and must not be used for clinical decision-making.
 
+
+
+symptom-checker-llm/
+├── frontend/              # React app (your symptom checker UI)
+│   ├── src/
+│   │   └── App.tsx        # Code I provided in canvas
+│   ├── package.json
+│   └── ...
+├── backend/               # Node/Express Hugging Face API
+│   ├── server.js
+│   ├── package.json
+│   └── .env.example
+├── README.md
+└── LICENSE
+
+
 ---
 
 ## Features
