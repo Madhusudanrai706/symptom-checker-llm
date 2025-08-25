@@ -1,1 +1,119 @@
+// server.js
+import 'dotenv/config';
+import express from 'express';
+import fetch from 'node-fetch';
+import { z } from 'zod';
+
+const app = express();
+app.use(express.json());
+
+const MODEL_ID = process.env.HF_MODEL_ID || "meta-llama/Meta-Llama-3.1-8B-Instruct";
+const HF_API_TOKEN = process.env.HF_API_TOKEN;
+
+// Strict response schema (keeps front end happy)
+const DiagnoseSchema = z.object({
+  diagnoses: z.array(z.object({
+    name: z.string(),
+    confidence: z.number().min(0).max(1).optional(),
+    explanation: z.string().optional()
+  })),
+  next_steps: z.array(z.string()),
+  red_flags: z.array(z.string()).optional(),
+  model_info: z.object({
+    model_id: z.string().optional(),
+    latency_ms: z.number().optional()
+  }).optional()
+});
+
+const SYSTEM_BLOCK = `
+You are a medical triage assistant. You ALWAYS answer with STRICT JSON ONLY. 
+No prose, no markdown. Target audience is general public. Calibrate confidence 0.0-1.0.
+JSON schema: {
+  "diagnoses": [{"name": string, "confidence": number (0..1), "explanation": string}], 
+  "next_steps": [string], 
+  "red_flags": [string]
+}
+If symptoms suggest urgent care needs, include a red_flags item.
+`;
+
+function buildPrompt({ symptoms, age, sex, duration }) {
+  return `
+${SYSTEM_BLOCK}
+
+USER_CONTEXT:
+- Symptoms: ${symptoms}
+- Age: ${age || "unknown"}
+- Sex: ${sex || "unspecified"}
+- Duration: ${duration || "unspecified"}
+
+Return ONLY valid JSON per schema, no backticks, no explanation text.
+`;
+}
+
+async function callHF(prompt) {
+  const t0 = Date.now();
+  const res = await fetch(`https://api-inference.huggingface.co/models/${encodeURIComponent(MODEL_ID)}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${HF_API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      inputs: prompt,
+      parameters: {
+        max_new_tokens: 400,
+        temperature: 0.2,
+        return_full_text: false
+      }
+    })
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HF error ${res.status}: ${text}`);
+  }
+
+  const out = await res.json();
+
+  // Inference API (text-generation) typically returns [{generated_text: "..."}]
+  const text = Array.isArray(out) && out[0]?.generated_text ? out[0].generated_text : (typeof out === "string" ? out : JSON.stringify(out));
+
+  // Try to parse strict JSON; if the model wrapped it, extract with a lazy brace match
+  let jsonStr = text;
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1) {
+    jsonStr = text.slice(firstBrace, lastBrace + 1);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    throw new Error("Model did not return valid JSON.");
+  }
+
+  const latency_ms = Date.now() - t0;
+  parsed.model_info = { ...(parsed.model_info || {}), model_id: MODEL_ID, latency_ms };
+  return DiagnoseSchema.parse(parsed);
+}
+
+app.post("/api/diagnose", async (req, res) => {
+  const { symptoms, age, sex, duration } = req.body || {};
+  if (!symptoms || String(symptoms).trim().length < 6) {
+    return res.status(400).json({ error: "Please provide a brief description of your symptoms." });
+  }
+  if (!HF_API_TOKEN) {
+    return res.status(500).json({ error: "HF_API_TOKEN is not set on the server." });
+  }
+  try {
+    const prompt = buildPrompt({ symptoms, age, sex, duration });
+    const data = await callHF(prompt);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: e.message || "Upstream model error." });
+  }
+});
+
+app.listen(3001, () => console.log("API listening on http://localhost:3001"));
 
